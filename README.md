@@ -65,3 +65,4 @@ Download templates directly from the Import CSV buttons inside the app.
 **Products CSV columns:**
 `sku, name, brand, category, cost, price, initial stock`
 "# brandtree-dashboard" 
+ 
