@@ -198,9 +198,11 @@ function FilterBar({ filters, C }) {
 
 // ─── CSV ──────────────────────────────────────────────────────────────────────
 function parseCSV(text) {
+  // Strip UTF-8 BOM if present (common in Excel-saved CSVs)
+  text = text.replace(/^\uFEFF/, "");
   const lines = text.split(/\r?\n/).filter(l => l.trim());
   if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map(h => h.trim().toLowerCase().replace(/"/g, ""));
+  const headers = lines[0].split(",").map(h => h.trim().toLowerCase().replace(/"/g, "").replace(/\s+/g, " "));
   return lines.slice(1).map(line => {
     const vals = [];
     let cur = "", inQ = false;
@@ -211,7 +213,7 @@ function parseCSV(text) {
       else if (ch !== undefined) cur += ch;
     }
     const obj = {};
-    headers.forEach((h, i) => { obj[h] = vals[i] !== undefined ? vals[i] : ""; });
+    headers.forEach((h, i) => { obj[h] = vals[i] !== undefined ? vals[i].trim() : ""; });
     return obj;
   });
 }
@@ -554,11 +556,15 @@ function SalesTab({ sales, setSales, addSale, updateSale, products, productMap, 
   const bulkDelete   = () => { if (!window.confirm("Delete " + selected.size + " sale(s)?")) return; setSales(s => s.filter(x => !selected.has(x.id))); setSelected(new Set()); };
 
   const handleCSV = rows => {
-    rows.forEach(r => {
-      const prod = products.find(p => p.sku && p.sku.toLowerCase() === (r.sku||"").toLowerCase())
-                || products.find(p => p.name && p.name.toLowerCase() === (r["product name"]||r.product||"").toLowerCase());
-      if (!prod) return;
+    let imported = 0, skipped = [];
+    rows.forEach((r, i) => {
+      const skuVal  = (r.sku||"").toLowerCase().trim();
+      const nameVal = (r["product name"]||r.product||"").toLowerCase().trim();
+      const prod = (skuVal  && products.find(p => p.sku  && p.sku.toLowerCase()  === skuVal))
+                || (nameVal && products.find(p => p.name && p.name.toLowerCase() === nameVal));
+      if (!prod) { skipped.push("Row "+(i+2)+': SKU/product "'+(r.sku||r["product name"]||"unknown")+'" not found'); return; }
       const _sp = parseFloat(r["sales price"]||r.salesprice||r.price)||0;
+      if (!_sp) { skipped.push("Row "+(i+2)+": missing sales price"); return; }
       const _sc = parseFloat(r["shipping charged"]||r.shippingcharged)||0;
       const _qty= parseInt(r.qty||r.quantity)||1;
       const _vR = parseFloat(r["vat rate"]||r.vatrate)||21;
@@ -569,7 +575,11 @@ function SalesTab({ sales, setSales, addSale, updateSale, products, productMap, 
       const _mi = parseFloat(r["misc cost"]||r.misccost)||0;
       const _cogs=(prod.cost||0)*_qty;
       addSale({ date: r.date||todayStr(), productId: prod.id, qty:_qty, salesPrice:_sp, shippingCharged:_sc, shippingCost:_shC, vatRate:_vR, vatAmount:_vA, commissionPct:_cP, commissionAmt:_cA, miscCost:_mi, platform:r.platform||"Amazon", notes:r.notes||"", profit:_sp*_qty-_vA-_cA+(_sc-_shC)*_qty-_mi*_qty-_cogs });
+      imported++;
     });
+    if (skipped.length > 0) alert("Imported "+imported+" row(s).\n\nSkipped:\n"+skipped.join("\n")+"\n\nTip: SKU must match a product in the Products tab exactly.");
+    else if (imported > 0) alert("Successfully imported "+imported+" sale(s).");
+    else alert("Nothing imported. Check that your SKU column matches products in the Products tab.");
   };
 
   const ts = { background: C.surfaceAlt, fontWeight: 800 };
@@ -881,14 +891,16 @@ function ProductsTab({ products, setProducts, inventory, setInventory, C }) {
     setSelected(new Set());
   };
   const handleCSV = rows => {
-    const np = rows.map(r => {
+    const np = rows.filter(r => (r.sku||r.name||r["product name"]||"").trim()).map(r => {
       const rc = (r.category||"physical").toLowerCase();
       const cat= rc.includes("dig")?"digital":rc.includes("serv")?"service":"physical";
-      const p  = { id:uid(), sku:r.sku||uid(), name:r.name||r["product name"]||"", brand:r.brand||"", category:cat, cost:parseFloat(r["cost price"]||r.cost)||0 };
+      const p  = { id:uid(), sku:(r.sku||"").trim()||uid(), name:(r.name||r["product name"]||"").trim(), brand:(r.brand||"").trim(), category:cat, cost:parseFloat(r["cost price"]||r.cost)||0 };
       if (p.category==="physical") setInventory(inv=>({...inv,[p.id]:0}));
       return p;
     });
+    if (np.length === 0) { alert("Nothing imported. Make sure your CSV has sku and name columns."); return; }
     setProducts(p => [...p, ...np]);
+    alert("Successfully imported "+np.length+" product(s).");
   };
 
   return (
@@ -1184,10 +1196,12 @@ function ExpensesTab({ expenses, setExpenses, C }) {
   };
   const handleCSV = rows => {
     const newExp = rows.filter(r => r.amount && parseFloat(r.amount) > 0).map(r => ({
-      id:uid(), date:r.date||todayStr(), category:r.category||EXPENSE_CATEGORIES[0],
-      description:r.description||"", amount:parseFloat(r.amount)||0, notes:r.notes||"", createdAt:Date.now(),
+      id:uid(), date:(r.date||todayStr()).trim(), category:(r.category||EXPENSE_CATEGORIES[0]).trim(),
+      description:(r.description||"").trim(), amount:parseFloat(r.amount)||0, notes:(r.notes||"").trim(), createdAt:Date.now(),
     }));
+    if (newExp.length === 0) { alert("Nothing imported. Make sure your CSV has an amount column with values greater than 0."); return; }
     setExpenses(e => [...newExp, ...e]);
+    alert("Successfully imported "+newExp.length+" expense(s).");
   };
 
   const ts = { background: C.surfaceAlt, fontWeight: 800 };
@@ -1324,11 +1338,13 @@ function DepositsTab({ deposits, setDeposits, C }) {
     closeModal();
   };
   const handleCSV = rows => {
-    const nd = rows.filter(r=>r.amount&&r.origin).map(r => ({
-      id:uid(), date:r.date||todayStr(), origin:r.origin||"",
-      amount:parseFloat(r.amount)||0, notes:r.notes||"", createdAt:Date.now(),
+    const nd = rows.filter(r=>(r.amount||"").trim()&&(r.origin||"").trim()).map(r => ({
+      id:uid(), date:(r.date||todayStr()).trim(), origin:r.origin.trim(),
+      amount:parseFloat(r.amount)||0, notes:(r.notes||"").trim(), createdAt:Date.now(),
     }));
+    if (nd.length === 0) { alert("Nothing imported. Make sure your CSV has origin and amount columns filled in."); return; }
     setDeposits(d => [...nd, ...d]);
+    alert("Successfully imported "+nd.length+" deposit(s).");
   };
 
   const ts = { background: C.surfaceAlt, fontWeight: 800 };
@@ -1492,11 +1508,13 @@ function OrdersTab({ purchaseOrders, setPurchaseOrders, addPurchaseOrder, refund
   };
 
   const handlePOCSV = rows => {
-    rows.forEach(r => {
+    let imported = 0, skipped = [];
+    rows.forEach((r, i) => {
       const sku  = String(r.sku||"").trim().toLowerCase();
       const name = String(r.product||r["product name"]||"").trim().toLowerCase();
-      const prod = products.find(p=>p.sku&&p.sku.toLowerCase()===sku) || products.find(p=>p.name&&p.name.toLowerCase()===name);
-      if (!prod) return;
+      const prod = (sku  && products.find(p=>p.sku&&p.sku.toLowerCase()===sku))
+                || (name && products.find(p=>p.name&&p.name.toLowerCase()===name));
+      if (!prod) { skipped.push("Row "+(i+2)+': "'+(r.sku||r.product||"unknown")+'" not found'); return; }
       addPurchaseOrder({
         date:      String(r.date||todayStr()).trim(),
         productId: prod.id,
@@ -1505,7 +1523,11 @@ function OrdersTab({ purchaseOrders, setPurchaseOrders, addPurchaseOrder, refund
         supplier:  String(r["supplier/brand"]||r["supplier"]||r["brand"]||"").trim(),
         notes:     String(r.notes||"").trim(),
       });
+      imported++;
     });
+    if (skipped.length > 0) alert("Imported "+imported+" PO(s).\n\nSkipped:\n"+skipped.join("\n")+"\n\nTip: SKU must match a product in the Products tab exactly.");
+    else if (imported > 0) alert("Successfully imported "+imported+" purchase order(s).");
+    else alert("Nothing imported. Check that your SKU column matches products in the Products tab.");
   };
 
   const activeSales = sales.filter(s => !s.refunded);
